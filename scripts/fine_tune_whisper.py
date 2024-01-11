@@ -100,9 +100,12 @@ def compute_metrics_cer(pred):
 if __name__ == "__main__":
     start_time = datetime.now()
     pargs = parge_args()
-    model_card = f"openai/{pargs.model_name}"
+    if pargs.model_name.startswith("whisper"):
+        model_card = f"openai/{pargs.model_name}"
+    else:
+        model_card = f"distil-whisper/{pargs.model_name}"
     model_name = model_card.split("/")[-1]
-    EPOCHS = 10
+    EPOCHS = 2
     config = configparser.ConfigParser()
     config.read("config.ini")
     processor = AutoProcessor.from_pretrained(
@@ -111,15 +114,15 @@ if __name__ == "__main__":
         model_card)
     feature_extractor = WhisperFeatureExtractor.from_pretrained(model_card)
     coraal_dt = load_dataset(
-        "audiofolder", data_dir=config['DATA']['dataset'],)
-        # split="train[:20%]")
+        "audiofolder", data_dir=config['DATA']['dataset'],
+        split="train[:20%]")
     # coraal_dt = coraal_dt.train_test_split(test_size=0.3)
     coraal_dt = coraal_dt.cast_column("audio", Audio(sampling_rate=16000))
     # print("preprocessing the audio dataset")
     coraal_dt = coraal_dt.map(prepare_dataset, num_proc=16)
     model = WhisperForConditionalGeneration.from_pretrained(
-        model_card,)
-        # use_flash_attention_2=True)
+        model_card,
+        use_flash_attention_2=True)
     model.is_parallelizable = True
     model.model_parallel = True
     model.config.use_cache = False
@@ -144,8 +147,8 @@ if __name__ == "__main__":
         evaluation_strategy="epoch",
         logging_strategy="epoch",
         save_strategy="epoch",
-        report_to="wandb",
-        run_name=f"{model_name}-clean",
+        report_to="none",
+        # run_name=f"{model_name}-clean-{EPOCHS}",
         load_best_model_at_end=True,
         metric_for_best_model="wer",
         greater_is_better=False,
@@ -153,7 +156,7 @@ if __name__ == "__main__":
         torch_compile=True,
         seed=42,
         data_seed=42,
-        group_by_length=False
+        group_by_length=False,
     )
     trainer = Seq2SeqTrainer(
         args=training_args,
@@ -166,8 +169,8 @@ if __name__ == "__main__":
     )
     trainer.train()
     # save to local
-    model.save_pretrained(f"../ft-models/{model_name}/model/")
-    processor.save_pretrained(f"../ft-models/{model_name}/processor/")
-    # remove checkpoints
-    shutil.rmtree(f"../{model_name}")
+    # model.save_pretrained(f"../ft-models/{model_name}-{EPOCHS}/model/")
+    # processor.save_pretrained(f"../ft-models/{model_name}-{EPOCHS}/processor/")
+    # # remove checkpoints
+    # shutil.rmtree(f"../{model_name}")
     print(f"Total running time: {datetime.now() - start_time}")

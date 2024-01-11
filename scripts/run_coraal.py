@@ -7,6 +7,7 @@ import re
 import configparser
 import numpy as np
 import pandas as pd
+from datasets import load_dataset
 
 def words_to_numbers(input_text):
     # Dictionary mapping words to numbers
@@ -89,8 +90,11 @@ if __name__ == "__main__":
     start_time = datetime.now()
     config = configparser.ConfigParser()
     config.read("config.ini")
-    config = configparser.ConfigParser()
-    config.read("config.ini")
-    tran_df = load_trans(config['DATA']['data'])
-    tran_df = tran_df[['Content', "clean_tran"]]
-    tran_df.to_csv("../debug_tran_df.tsv", sep="\t", index=False)
+    # tran_df = load_trans(config['DATA']['data'])
+    # tran_df = tran_df[['Content', "clean_tran"]]
+    # tran_df.to_csv("../debug_tran_df.tsv", sep="\t", index=False)
+    vali_set = glob(f"{config['DATA']['vali']}/*")
+    for sub_set in vali_set:
+        coraal_dt = load_dataset(
+            "audiofolder", data_dir=sub_set,)
+        print(coraal_dt)

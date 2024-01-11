@@ -198,7 +198,4 @@ if __name__ == "__main__":
     tran_df = load_trans(config['DATA']['data'])
     tran_df.to_csv("../total_df.csv", index=False)
     build_dataset(tran_df, config['DATA']['dataset'])
-    coraal_dt = load_dataset(
-        "audiofolder", data_dir=config['DATA']['dataset'])
-    print(coraal_dt)
     print(f"Total running time: {datetime.now() - begin_time}")
