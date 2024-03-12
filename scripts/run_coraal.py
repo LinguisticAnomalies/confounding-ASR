@@ -2,6 +2,7 @@ from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 from glob import glob
+import tarfile
 import os
 import re
 import configparser
@@ -84,17 +85,14 @@ def load_trans(file_path):
     print(f"Number of utterance AFTER cleaning: {len(total_df)}")
     return total_df
 
+def list_files_in_tar_gz(folder_name):
+    with tarfile.open(folder_name, 'r:gz') as tar:
+        file_list = [member.name for member in tar.getmembers() if member.isfile()]
+    return file_list
 
 
 if __name__ == "__main__":
     start_time = datetime.now()
     config = configparser.ConfigParser()
     config.read("config.ini")
-    # tran_df = load_trans(config['DATA']['data'])
-    # tran_df = tran_df[['Content', "clean_tran"]]
-    # tran_df.to_csv("../debug_tran_df.tsv", sep="\t", index=False)
-    vali_set = glob(f"{config['DATA']['vali']}/*")
-    for sub_set in vali_set:
-        coraal_dt = load_dataset(
-            "audiofolder", data_dir=sub_set,)
-        print(coraal_dt)
+    trans = glob("../coraal-files/*.tsv")

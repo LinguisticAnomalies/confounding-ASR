@@ -2,24 +2,25 @@
 Fine tune whisper on CORAAL test set
 '''
 
-
 from datetime import datetime
 import warnings
-import os
 import argparse
 import configparser
-import shutil
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
-import pandas as pd
 import torch
 import evaluate
-from datasets import load_dataset, Audio, Dataset
-from transformers import AutoProcessor, WhisperForConditionalGeneration
-from transformers import WhisperFeatureExtractor, WhisperTokenizer
-from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
+from datasets import load_dataset, Audio
+from transformers import (
+    AutoProcessor,
+    AutoModelForSpeechSeq2Seq,
+    WhisperFeatureExtractor,
+    WhisperTokenizer,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
+    set_seed
+)
 warnings.filterwarnings('ignore')
-os.environ["WANDB_PROJECT"]="coraal"
 
 
 @dataclass
@@ -66,7 +67,7 @@ def prepare_dataset(batch):
     # compute log-Mel input features from input audio array 
     batch["input_features"] = feature_extractor(
         audio["array"], sampling_rate=audio["sampling_rate"]).input_features[0]
-    # encode target text to label ids 
+    # encode target text to label ids
     batch["labels"] = tokenizer(batch["transcription"]).input_ids
     return batch
 
@@ -79,33 +80,22 @@ def compute_metrics_wer(pred):
     label_ids[label_ids == -100] = tokenizer.pad_token_id
     # we do not want to group tokens when computing the metrics
     pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
-    label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+    label_str = tokenizer.batch_decode(
+        label_ids, skip_special_tokens=True, normalize=False)
     wer = 100 * metric.compute(predictions=pred_str, references=label_str)
     return {"wer": wer}
 
 
-def compute_metrics_cer(pred):
-    metric = evaluate.load('cer')
-    pred_ids = pred.predictions
-    label_ids = pred.label_ids
-    # replace -100 with the pad_token_id
-    label_ids[label_ids == -100] = tokenizer.pad_token_id
-    # we do not want to group tokens when computing the metrics
-    pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
-    label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-    cer = 100 * metric.compute(predictions=pred_str, references=label_str)
-    return {"cer": cer}
-
-
 if __name__ == "__main__":
     start_time = datetime.now()
+    set_seed(42)
+    torch_dtype = torch.float16
     pargs = parge_args()
     if pargs.model_name.startswith("whisper"):
         model_card = f"openai/{pargs.model_name}"
     else:
         model_card = f"distil-whisper/{pargs.model_name}"
-    model_name = model_card.split("/")[-1]
-    EPOCHS = 2
+    EPOCHS = 4
     config = configparser.ConfigParser()
     config.read("config.ini")
     processor = AutoProcessor.from_pretrained(
@@ -114,15 +104,19 @@ if __name__ == "__main__":
         model_card)
     feature_extractor = WhisperFeatureExtractor.from_pretrained(model_card)
     coraal_dt = load_dataset(
-        "audiofolder", data_dir=config['DATA']['dataset'],
-        split="train[:20%]")
-    # coraal_dt = coraal_dt.train_test_split(test_size=0.3)
+        "audiofolder", data_dir=config['DATA']['data'],)
+        # split="train[:1%]")
     coraal_dt = coraal_dt.cast_column("audio", Audio(sampling_rate=16000))
-    # print("preprocessing the audio dataset")
-    coraal_dt = coraal_dt.map(prepare_dataset, num_proc=16)
-    model = WhisperForConditionalGeneration.from_pretrained(
+    print("preprocessing the audio dataset")
+    coraal_dt = coraal_dt.map(
+        prepare_dataset, num_proc=16, remove_columns=['audio', 'transcription'])
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(
         model_card,
-        use_flash_attention_2=True)
+        low_cpu_mem_usage=True,)
+        # attn_implementation="flash_attention_2",
+        # use_safetensors=True)
+    # freeze encoder
+    model.freeze_encoder()
     model.is_parallelizable = True
     model.model_parallel = True
     model.config.use_cache = False
@@ -131,15 +125,14 @@ if __name__ == "__main__":
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
     # training process
     training_args = Seq2SeqTrainingArguments(
-        output_dir=f"../{model_name}", 
+        output_dir=f"../{pargs.model_name}", 
         per_device_train_batch_size=16,
         gradient_accumulation_steps=1,
-        learning_rate=1e-4,
-        lr_scheduler_type='cosine',
+        learning_rate=5e-4,
         warmup_steps=100,
         # speed up
-        gradient_checkpointing=True,
         fp16=True,
+        gradient_checkpointing=True,
         per_device_eval_batch_size=8,
         predict_with_generate=True,
         generation_max_length=225,
@@ -152,11 +145,8 @@ if __name__ == "__main__":
         load_best_model_at_end=True,
         metric_for_best_model="wer",
         greater_is_better=False,
-        auto_find_batch_size=True,
-        torch_compile=True,
         seed=42,
         data_seed=42,
-        group_by_length=False,
     )
     trainer = Seq2SeqTrainer(
         args=training_args,
@@ -169,8 +159,6 @@ if __name__ == "__main__":
     )
     trainer.train()
     # save to local
-    # model.save_pretrained(f"../ft-models/{model_name}-{EPOCHS}/model/")
-    # processor.save_pretrained(f"../ft-models/{model_name}-{EPOCHS}/processor/")
-    # # remove checkpoints
-    # shutil.rmtree(f"../{model_name}")
+    model.save_pretrained(f"../ft-models/{pargs.model_name}-{EPOCHS}/model/")
+    processor.save_pretrained(f"../ft-models/{pargs.model_name}-{EPOCHS}/processor/")
     print(f"Total running time: {datetime.now() - start_time}")
