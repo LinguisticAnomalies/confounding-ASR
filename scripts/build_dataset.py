@@ -13,7 +13,7 @@ from glob import glob
 import pandas as pd
 from pydub import AudioSegment
 from datasets import load_dataset
-from sklearn.model_selection import train_test_split, StratifiedShuffleSplit
+from sklearn.model_selection import train_test_split
 warnings.filterwarnings('ignore')
 
 
@@ -57,9 +57,9 @@ def split_data(full_df):
     """
     full_df['geo'] = full_df['Spkr'].str[:3]
     train_set, temp_set = train_test_split(
-        full_df, test_size=0.5, random_state=42, stratify=full_df['geo', "Spkr"])
+        full_df, test_size=0.5, random_state=42, stratify=full_df['geo'])
     test_set, val_set = train_test_split(
-        temp_set, test_size=0.6, random_state=42, stratify=temp_set['geo', "Spkr"])
+        temp_set, test_size=0.6, random_state=42, stratify=temp_set['geo'])
     for geo_subset in [train_set, test_set, val_set]:
         geo_subset = geo_subset.groupby('Spkr', group_keys=False).apply(
             lambda x: x.sample(min(len(x), 1), random_state=42)

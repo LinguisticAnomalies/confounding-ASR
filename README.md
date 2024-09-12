@@ -32,8 +32,6 @@ val_nr = /path/to/post/processing/data/validation/split/after/noise/reduction
 The [CORAAL](https://oraal.uoregon.edu/coraal) is publicly available online. You can find *This Side of The River - The Story of Princeville* on [YouTube](https://www.youtube.com/watch?v=KhRUSZoJ5_Y).
 
 ## Folders
-
-## Folders
 The structure of the repo is listed as follows:
 
 ```
@@ -58,7 +56,7 @@ The fine-tuned models are saved under the `ft-models` folders, and the generated
 
 ### Preprocessing
 
-We use [TRESTLE](https://github.com/LinguisticAnomalies/harmonized-toolkit) to preprocessing the text and audio utterances. Please refer to TRESTLE's GitHub repository for more information.
+We combine [TRESTLE](https://github.com/LinguisticAnomalies/harmonized-toolkit) to preprocessing the text and audio utterances. Please refer to TRESTLE's GitHub repository for more information.
 
 ### Scripts usage
 

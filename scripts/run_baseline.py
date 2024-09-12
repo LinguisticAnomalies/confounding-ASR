@@ -61,13 +61,14 @@ def get_files(parent_folder):
                   "PRV", "ROC", "LES", "VLD")
     for subfolder in subfolders:
         pair_dict = {}
-        sub_coraal_wav = glob(os.path.join(parent_folder, subfolder, '*.wav'))
-        sub_coraal_txt = glob(os.path.join(parent_folder, subfolder, '*.txt'))
+        sub_coraal_wav = glob(os.path.join(parent_folder, "audio", subfolder, '*.wav'))
+        sub_coraal_txt = glob(os.path.join(parent_folder, "txt", subfolder, '*.txt'))
         for wav_file in sub_coraal_wav:
             base_name = os.path.splitext(os.path.basename(wav_file))[0]
             matching_txt_file = next((txt for txt in sub_coraal_txt if os.path.splitext(os.path.basename(txt))[0] == base_name), None)
             if matching_txt_file:
                 pair_dict[base_name] = {'wav': wav_file, 'txt': matching_txt_file}
+        os.makedirs("../coraal-files/", exist_ok=True)
         with open(f"../coraal-files/{subfolder}.json", "w") as json_file:
             json.dump(pair_dict, json_file)
 
