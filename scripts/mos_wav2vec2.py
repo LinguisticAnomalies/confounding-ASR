@@ -1,5 +1,11 @@
+'''
+Adapt MOS on pre-trained Wav2Vec2 base model
+Adapted from: https://github.com/nii-yamagishilab/mos-finetune-ssl
+'''
+import argparse
 import logging
 from tqdm import tqdm
+from datetime import datetime
 import os
 import json
 import warnings
@@ -14,6 +20,7 @@ from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 from transformers import set_seed, Wav2Vec2Model
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 warnings.filterwarnings('ignore')
 
@@ -33,6 +40,7 @@ class TrainingConfig:
         num_epochs (int): Number of training epochs.
         patience (int): Number of epochs to wait before early stopping.
         save_dir (str): Directory to save the trained model.
+        scheduler_type (str): Type of scheduler to use ('cosine' or 'plateau').
     """
     model: nn.Module
     train_loader: DataLoader
@@ -44,25 +52,36 @@ class TrainingConfig:
     num_epochs: int
     patience: int
     save_dir: str
+    scheduler_type: str
 
-def setup_logging(log_dir: str) -> None:
+
+def setup_logging(log_dir: str, scheduler_type: str) -> str:
     """
-    Set up logging configuration.
+    Set up logging configuration with unique filenames.
 
     Args:
         log_dir (str): Directory to store log files.
+        scheduler_type (str): Type of scheduler being used.
+
+    Returns:
+        str: Path to the created log file.
     """
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
-    log_file = os.path.join(log_dir, 'training.log')
+
+    log_filename = f"training_{scheduler_type}.log"
+    log_filepath = os.path.join(log_dir, log_filename)
+    
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] - %(message)s',
         handlers=[
-            logging.FileHandler(log_file),
+            logging.FileHandler(log_filepath),
             logging.StreamHandler()
         ]
     )
+    
+    return log_filepath
 
 class VoiceMOSDataset(Dataset):
     """
@@ -216,6 +235,7 @@ def load_voicemos_split(root_dir: str, split: str, batch_size: int, shuffle: boo
         collate_fn=VoiceMOSDataset.collate_fn)
     return dataset, dataloader
 
+
 def train(config: TrainingConfig) -> nn.Module:
     """
     Train the model using the provided configuration.
@@ -250,7 +270,10 @@ def train(config: TrainingConfig) -> nn.Module:
         val_loss = validate(config)
         logging.info(f"Epoch {epoch+1}/{config.num_epochs} - Validation loss: {val_loss:.4f}")
 
-        config.scheduler.step(val_loss)
+        if config.scheduler_type == 'cosine':
+            config.scheduler.step()
+        elif config.scheduler_type == 'plateau':
+            config.scheduler.step(val_loss)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -262,6 +285,9 @@ def train(config: TrainingConfig) -> nn.Module:
             if patience_counter >= config.patience:
                 logging.info(f"Early stopping triggered after {epoch+1} epochs")
                 break
+
+        current_lr = config.optimizer.param_groups[0]['lr']
+        logging.info(f"Current learning rate: {current_lr:.6f}")
 
     return config.model
 
@@ -290,25 +316,33 @@ def validate(config: TrainingConfig) -> float:
     return val_loss / val_steps
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train MOS Predictor")
+    parser.add_argument("--scheduler", type=str, choices=['cosine', 'plateau'], default='cosine',
+                        help="Type of learning rate scheduler to use")
+    parser.add_argument("--epochs", type=int, default=50, help="Number of epochs to train")
+    args = parser.parse_args()
+
     config_parser = configparser.ConfigParser()
     config_parser.read("config.ini")
 
     # Hyperparameters
     batch_size = 32
     num_epochs = 50
-    learning_rate = 1e-4
+    initial_learning_rate = 1e-4
     patience = 10
     device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 
     set_seed(42)
-    setup_logging("logs")
+    log_filepath = setup_logging("logs", args.scheduler)
 
-    logging.info("Starting training with the following hyperparameters:")
+    logging.info(f"Log file created at: {log_filepath}")
+    logging.info("Starting training with the following parameters:")
     logging.info(f"Batch size: {batch_size}")
     logging.info(f"Number of epochs: {num_epochs}")
-    logging.info(f"Learning rate: {learning_rate}")
+    logging.info(f"Initial learning rate: {initial_learning_rate}")
     logging.info(f"Patience: {patience}")
     logging.info(f"Device: {device}")
+    logging.info(f"Scheduler: {args.scheduler}")
 
     model_name = "facebook/wav2vec2-base"
     wav2vec2_model = Wav2Vec2Model.from_pretrained(model_name)
@@ -323,10 +357,13 @@ if __name__ == "__main__":
     
     # mean absolute error
     criterion = nn.L1Loss()
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    optimizer = optim.AdamW(model.parameters(), lr=initial_learning_rate)
+    if args.scheduler == 'cosine':
+        scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
+    else:  # 'plateau'
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
 
-    save_dir = "../fine-tuned/mos-wav2vec2"
+    save_dir = f"../fine-tuned/mos-wav2vec2_{args.scheduler}"
 
     training_config = TrainingConfig(
         model=model,
@@ -338,7 +375,8 @@ if __name__ == "__main__":
         device=device,
         num_epochs=num_epochs,
         patience=patience,
-        save_dir=save_dir
+        save_dir=save_dir,
+        scheduler_type=args.scheduler
     )
 
     model = train(training_config)
