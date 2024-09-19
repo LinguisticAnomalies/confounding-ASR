@@ -5,7 +5,6 @@ Adapted from: https://github.com/nii-yamagishilab/mos-finetune-ssl
 import argparse
 import logging
 from tqdm import tqdm
-from datetime import datetime
 import os
 import json
 import warnings
@@ -327,7 +326,7 @@ if __name__ == "__main__":
 
     # Hyperparameters
     batch_size = 32
-    num_epochs = 50
+    num_epochs = args.epochs
     initial_learning_rate = 1e-4
     patience = 10
     device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
