@@ -7,10 +7,10 @@ Adapted from nanoGPT GitHub repo
 
 from datetime import datetime
 import warnings
-warnings.filterwarnings('ignore')
-import re
+import argparse
 import os
-import json
+import logging
+import configparser
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from scipy import stats as st
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 block_size = 512
 batch_size = 64
 max_iters = 50000
@@ -30,78 +30,50 @@ n_layer = 6
 dropout = 0.2
 learning_rate = 3e-4
 num_epochs = 5
+patience = 2
+warnings.filterwarnings('ignore')
 
-
-def clean_txt(txtin):
+def parge_args():
     """
-    text preprocessing for utterances
-
-    :param txtin: the utterance
-    :type txtin: str
-    :return: the cleaned utterance
-    :rtype: str
+    add argument parser
     """
-    # remove filling words
-    txtout = re.sub(r"(?i)\b(?:(?:um(?:-|h)?|nuh-|mm(?:-|mm)?)|(?:^|\W)uh\b)", "", txtin)
-    txtout = re.sub(r'\b(?:huh|uh)\b', "", txtout)
-    # ooh -> oh
-    txtout = re.sub(r"(?i)ooh", "oh", txtout)
-    txtout = re.sub(r'\([^)]*\)', "", txtout)
-    txtout = re.sub(r"\/[^)]*\/", "", txtout)
-    txtout = re.sub(r"\<[^)]*\>", "", txtout)
-    txtout = re.sub(r'[^a-zA-Z0-9\s\'-]', "", txtout)
-    # non-breaking spaces
-    txtout = txtout.replace("\xa0", " ")
-    return txtout.lower().strip()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--train", action="store_true",
+        help="""Indicator if train the character-level LM"""
+    )
+    parser.add_argument(
+        "--evaluate", action="store_true",
+        help="""Indicator if get utterance-level perplexity from the validation set"""
+    )
+    return parser.parse_args()
 
+def setup_logging(log_dir: str, log_file: str) -> str:
+    """
+    Set up logging configuration with unique filenames.
 
-def get_data(loc):
-    info_file = f"../coraal-files/{loc}.json"
-    total_trans = []
-    with open(info_file, "r") as json_file:
-        info_obj = list(json.load(json_file).values())
-        text_files = [item['txt'] for item in info_obj]
-        text_files = [item.replace("/data1/", "/data4/") for item in text_files]
-        for text_file in text_files:
-            tran_df = pd.read_csv(text_file, sep="\t")
-            tran_df = tran_df[~tran_df['Spkr'].str.contains(r'(int|misc)', case=False)]
-            tran_df['clean_tran'] = tran_df["Content"].apply(clean_txt)
-            tran_df['clean_tran'] = tran_df['clean_tran'].str.replace("-", '')
-            tran_df.replace('', pd.NA, inplace=True)
-            tran_df.dropna(inplace=True)
-            trans = tran_df['clean_tran'].values.tolist()
-            total_trans.extend(trans)
-    return total_trans
+    Args:
+        log_dir (str): Directory to store log files.
+        log_file (str): The log file name.
 
-def get_batch_for_batch(split):
-    # generate a batch of data of inputs x and targets y
-    data = train_data if split == 'train' else val_data
-    batch_indices = torch.randint(len(data) - block_size - 1, (batch_size,))
+    Returns:
+        str: Path to the created log file.
+    """
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    log_filepath = os.path.join(log_dir, log_file)
     
-    batch_x = []
-    batch_y = []
-    for idx in batch_indices:
-        x = data[idx:idx+block_size]
-        y = data[idx+1:idx+block_size+1]
-        batch_x.append(x)
-        batch_y.append(y)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] - %(message)s',
+        handlers=[
+            logging.FileHandler(log_filepath),
+            logging.StreamHandler()
+        ]
+    )
     
-    x = torch.stack(batch_x)
-    y = torch.stack(batch_y)
-    
-    x, y = x.to(device), y.to(device)
-    
-    return x, y
-
-
-def get_batch_for_iter(split):
-    # generate a small batch of data of inputs x and targets y
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x, y
+    return log_filepath
 
 
 @torch.no_grad()
@@ -260,115 +232,174 @@ class GPTLanguageModel(nn.Module):
         return idx
 
 
-def calculate_perplexity(model, sentence):
-    model.eval()  # Set the model to evaluation mode
+def calculate_perplexity_batch(model, sentences):
+    model.eval()
     with torch.no_grad():
-        sentence = torch.tensor(sentence, dtype=torch.long, device=device).unsqueeze(0)
-        logits, _ = model(sentence)
-        logits = logits.squeeze(0)  # Remove the batch dimension
-        probs = F.softmax(logits, dim=-1)
-        targets = sentence[:, 1:]  # Assuming the next token is the target
-        targets = targets.contiguous().view(-1)  # Flatten targets
-        loss = F.cross_entropy(logits[:-1].contiguous().view(-1, logits.size(-1)), targets)
-        perplexity = torch.exp(loss)
-    return perplexity.item()
+        max_len = max(len(s) for s in sentences)
+        padded_sentences = [s + [0] * (max_len - len(s)) for s in sentences]
+        batch = torch.tensor(padded_sentences, dtype=torch.long, device=device)
+        logits, _ = model(batch)
+        
+        perplexities = []
+        for i, sentence in enumerate(sentences):
+            sentence_len = len(sentence)
+            sentence_logits = logits[i, :sentence_len-1]
+            targets = batch[i, 1:sentence_len]
+            
+            probs = F.softmax(sentence_logits, dim=-1)
+            loss = F.cross_entropy(sentence_logits, targets)
+            perplexity = torch.exp(loss)
+            perplexities.append(perplexity.item())
+        
+        return perplexities
 
-def ppl_driver(model, eval_list):
+def ppl_driver_batch(model, eval_list, loc):
     ppls = []
-    for sent in tqdm(eval_list, total=len(eval_list), desc="calculating PPLs"):
-        sent = torch.tensor(encode(sent), dtype=torch.long)
-        ppl = calculate_perplexity(model, sent)
-        ppls.append(ppl)
-    ppls = [x for x in ppls if not np.isnan(x)]
-    print(f"PPL length: {len(ppls)}")
-    intervals = st.t.interval(
-        confidence=0.95, df=len(ppls)-1,
-        loc=np.mean(ppls), scale=st.sem(ppls))
-    return np.mean(ppls), intervals
+    for i in tqdm(range(0, len(eval_list), batch_size), desc=f"Calculating PPLs on {loc} subset"):
+        batch = eval_list[i:i+batch_size]
+        encoded_batch = [encode(sent) for sent in batch]
+        batch_ppls = calculate_perplexity_batch(model, encoded_batch)
+        ppls.extend(batch_ppls)
+    return ppls
+
+def get_batch_for_batch(split):
+    # generate a batch of data of inputs x and targets y
+    data = train_data if split == 'train' else test_data
+    batch_indices = torch.randint(len(data) - block_size - 1, (batch_size,))
+    
+    batch_x = []
+    batch_y = []
+    for idx in batch_indices:
+        x = data[idx:idx+block_size]
+        y = data[idx+1:idx+block_size+1]
+        batch_x.append(x)
+        batch_y.append(y)
+    
+    x = torch.stack(batch_x)
+    y = torch.stack(batch_y)
+    
+    x, y = x.to(device), y.to(device)
+    
+    return x, y
+
+
+def get_batch_for_iter(split):
+    # generate a small batch of data of inputs x and targets y
+    data = train_data if split == 'train' else test_data
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([data[i:i+block_size] for i in ix])
+    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    x, y = x.to(device), y.to(device)
+    return x, y
+
+
+def get_data(loc, config):
+    train_df = pd.read_csv(os.path.join(config['DATA']['train'], "metadata.csv"))
+    test_df = pd.read_csv(os.path.join(config['DATA']['test'], "metadata.csv"))
+    val_df = pd.read_csv(os.path.join(config['DATA']['val'], loc, "metadata.csv"))
+    train_df['split'] = train_df['file_name'].str[:3]
+    test_df['split'] = test_df['file_name'].str[:3]
+    return train_df, test_df, val_df
 
 
 if __name__ == "__main__":
     start_time = datetime.now()
+    config_parser = configparser.ConfigParser()
+    config_parser.read("config.ini")
     torch.manual_seed(42)
     locs = ("ATL", "DCA", "DCB", "LES", "PRV", "ROC", "VLD")
+    pargs = parge_args()
+    # character encoder/decoder
     characters = [chr(x) for x in range(ord('a'), ord('z') + 1)]
     numbers = [str(x) for x in range(10)]
     chars = characters + numbers + [" ", "'"]
     vocab_size = len(chars)
+    # OOV
     stoi = { ch:i for i,ch in enumerate(chars) }
     itos = { i:ch for i,ch in enumerate(chars) }
-    encode = lambda s: [stoi[c] for c in s]
+    if ' ' not in stoi:
+        stoi[' '] = len(stoi)
+        itos.append(' ')
+    encode = lambda s: [stoi.get(c, stoi[' ']) for c in s]
     decode = lambda l: ''.join([itos[i] for i in l])
-    ci_data = []
-    for train_component in locs:
-        model_name = f"../ft-models/gpt-{train_component}.pth"
-        text = get_data(train_component)
-        text = " ".join(text)
-        stoi = { ch:i for i,ch in enumerate(chars) }
-        itos = { i:ch for i,ch in enumerate(chars) }
-        # treat oov as space
-        # encode = lambda s: [stoi.get(c, 0) for c in s]
-        encode = lambda s: [stoi[c] for c in s]
-        decode = lambda l: ''.join([itos[i] for i in l])
-        if os.path.exists(model_name):
+    # training process
+    if pargs.train:
+        for train_component in locs:
+            model_name = f"../fine-tuned/gpt-{train_component}.pth"
+            train_df, test_df, _ = get_data(train_component, config_parser)
+            train_sents = train_df['transcription'].values.tolist()
+            test_sents = test_df['transcription'].values.tolist()
+            if not os.path.exists(model_name):
+                # training and test split
+                log_filepath = setup_logging("logs", "train_char_gpt.log")
+                logging.info(f"Log file created at: {log_filepath}")
+                logging.info("Starting training with the following parameters:")
+                logging.info(f"Batch size: {batch_size}")
+                logging.info(f"Number of epochs: {num_epochs}")
+                logging.info(f"Initial learning rate: {learning_rate}")
+                logging.info(f"Patience: {patience}")
+                logging.info(f"Device: {device}")
+                logging.info(f"========== Training GPT on {train_component} ==============")
+                train_sents = " ".join(train_sents)
+                train_data = torch.tensor(encode(train_sents), dtype=torch.long)
+                test_data = " ".join(test_sents)
+                test_data = torch.tensor(encode(test_data), dtype=torch.long)
+                logging.info(f"traing set length: {len(train_data)}")
+                logging.info(f"test set length: {len(test_data)}")
+                model = GPTLanguageModel(
+                    vocab_size, n_embd, block_size, n_head, n_layer).to(device)
+                optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+                best_val_loss = float('inf')
+                best_model_state_dict = None
+                counter = 0
+                patience = 2
+                for iter in range(max_iters):
+                    model.train()
+                    xb, yb = get_batch_for_batch('train')
+                    logits, loss = model(xb, yb)
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    optimizer.step()
+                    if iter % eval_interval == 0 or iter == max_iters - 1:
+                        logging.info("--------------")
+                        model.eval()
+                        val_loss = 0.0
+                        losses = estimate_loss_iter()
+                        logging.info(f"step {iter}: train loss {losses['train']:.4f}, test loss {losses['val']:.4f}")
+                        if losses['val'] < best_val_loss:
+                            best_val_loss = losses['val']
+                            best_model_state_dict = model.state_dict()
+                        else:
+                            counter += 1
+                            if counter > patience:
+                                logging.info("early stopping")
+                                break
+                torch.save(best_model_state_dict, model_name)
+        logging.info(f"Total running time: {datetime.now() - start_time}")
+    if pargs.evaluate:
+        total_ppls = pd.DataFrame()
+        for train_component in locs:
+            print(f"Evaluating GPT-{train_component}")
+            model_name = f"../fine-tuned/gpt-{train_component}.pth"
             model = GPTLanguageModel(
                 vocab_size, n_embd, block_size, n_head, n_layer)
             model.load_state_dict(torch.load(model_name))
-            model.to("cuda")
+            model.to(device)
             for val_component in locs:
-                ppls = []
-                if val_component != train_component:
-                    val_text = get_data(val_component)
-                    ppl, interval = ppl_driver(model, val_text)
-                    record = {
-                        "train_corpus": train_component,
-                        "eval_corpus": val_component,
-                        "ppl": ppl,
-                        "lower_ci": interval[0],
-                        "upper_ci": interval[1]}
-                    ci_data.append(record)
-                    print(f"GPT-{train_component} ppl on {val_component}: {ppl}, 95% lower CI: {interval[0]}, 95% upper CI: {interval[1]}")
-                    print("------------------")
-            ci_df = pd.DataFrame(ci_data)
-            ci_df.to_csv("../char_gpt_ppl.csv", index=False)
-        else:
-            # training and validation split
-            print(f"Training GPT on {train_component}")
-            text = get_data(train_component)
-            text = " ".join(text)
-            data = torch.tensor(encode(text), dtype=torch.long)
-            n = int(0.9*len(data))
-            train_data = data[:n]
-            val_data = data[n:]
-            print(f"traing set length: {len(train_data)}")
-            print(f"val set length: {len(val_data)}")
-            model = GPTLanguageModel(
-                vocab_size, n_embd, block_size, n_head, n_layer).to(device)
-            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-            best_val_loss = float('inf')
-            best_model_state_dict = None
-            counter = 0
-            patience = 2
-            for iter in range(max_iters):
-                model.train()
-                xb, yb = get_batch_for_batch('train')
-                logits, loss = model(xb, yb)
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                optimizer.step()
-                if iter % eval_interval == 0 or iter == max_iters - 1:
-                    print("====================")
-                    model.eval()
-                    val_loss = 0.0
-                    losses = estimate_loss_iter()
-                    print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-                    if losses['val'] < best_val_loss:
-                        best_val_loss = losses['val']
-                        best_model_state_dict = model.state_dict()
-                    else:
-                        counter += 1
-                        if counter > patience:
-                            print("early stopping")
-                            break
-            torch.save(best_model_state_dict, model_name)
-    print(f"Total running time: {datetime.now() - start_time}")
+                _, _, val_df = get_data(val_component, config_parser)
+                val_sents = val_df['transcription'].values.tolist()
+                val_path = val_df['file_name'].values.tolist()
+                print(f"validation set length: {len(val_sents)}")
+                ppls = ppl_driver_batch(model, val_sents, val_component)
+                ppls = [item for item in ppls if item != np.nan]
+                val_locs = [val_component]*len(ppls)
+                train_locs= [train_component]*len(ppls)
+                sub_ppl = pd.DataFrame(
+                    {'ppl': ppls,
+                     'train': train_locs,
+                     'val': val_locs,
+                     "path": val_path
+                     })
+                total_ppls = pd.concat([total_ppls, sub_ppl])
+        total_ppls.dropna(subset=['ppl'], inplace=True)
+        total_ppls.to_csv("../total_ppl.csv", index=False)

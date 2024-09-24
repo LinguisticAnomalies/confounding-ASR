@@ -10,12 +10,15 @@ import argparse
 import configparser
 import torch
 import evaluate
-from datasets import load_dataset, Audio, Dataset
+import pandas as pd
+import numpy as np
+from datasets import load_dataset, Audio
 from transformers import (
     AutoProcessor,
     WhisperForConditionalGeneration,
     WhisperTokenizer,
 )
+from build_dataset import clean_txt
 warnings.filterwarnings('ignore')
 
 
@@ -48,7 +51,7 @@ def map_to_pred(batch):
     audio = batch['audio']
     input_features = processor(
         audio['array'], sampling_rate=audio['sampling_rate'], return_tensors="pt").input_features
-    input_features = input_features.to('cuda')
+    input_features = input_features.to('cuda:2')
     with torch.no_grad():
         predicted_ids = model.generate(input_features)
     preds = processor.batch_decode(
@@ -86,12 +89,29 @@ def compute_metrics_cer(pred):
     return {"cer": cer}
 
 
-def get_output_file(args, name, epoch, group=None):
+def get_output_file(args, name, group=None):
     file_suffix = f"_{group}" if group else ""
-    ft_suffix = "_ft" if args.finetune else ""
-    out_file = f"{name}{ft_suffix}{file_suffix}_{epoch}.csv"
-    out_file = f"../whisper-output-clean/val/{name}{ft_suffix}{file_suffix}_{epoch}.csv"
+    ft_suffix = "_ft" if args.finetune else "_pt"
+    out_file = f"{name}{ft_suffix}{file_suffix}.csv"
+    out_file = f"../whisper-output-clean/val/{name}{ft_suffix}{file_suffix}.csv"
     return out_file
+
+def compute_wer(row):
+    wer = evaluate.load("wer")
+    # Compute WER for a single pair of prediction and reference
+    try:
+        prediction = row['prediction'] if row['prediction'] else ''
+        transcription = row['transcription'] if row['transcription'] else ''
+        if not prediction and not transcription:
+            return 0.0
+        if not prediction and transcription:
+            return 1.0
+        if prediction and not transcription:
+            return 1.0
+        result = wer.compute(predictions=[transcription], references=[prediction])
+        return result
+    except TypeError:
+        return np.nan
 
 
 if __name__ == "__main__":
@@ -100,8 +120,7 @@ if __name__ == "__main__":
     pargs = parge_args()
     config = configparser.ConfigParser()
     config.read("config.ini")
-    # number of epochs for fine-tuning
-    EPOCHS = 4
+    
     if pargs.model_name.startswith("whisper"):
         MODEL_CARD = f"openai/{pargs.model_name}"
     else:
@@ -110,15 +129,17 @@ if __name__ == "__main__":
     tokenizer = WhisperTokenizer.from_pretrained(
     MODEL_CARD, language="english", task="transcribe")
     if pargs.finetune:
+        EPOCHS = 4
         processor = AutoProcessor.from_pretrained(
-            f"../ft-models/{MODEL_NAME}-{EPOCHS}/processor")
+            f"{config['MODEL']['checkpoint']}/{MODEL_NAME}-{EPOCHS}/processor")
         model = WhisperForConditionalGeneration.from_pretrained(
-            f"../ft-models/{MODEL_NAME}-{EPOCHS}/model")
+            f"{config['MODEL']['checkpoint']}/{MODEL_NAME}-{EPOCHS}/model")
     else:
+        EPOCHS = None
         model = WhisperForConditionalGeneration.from_pretrained(MODEL_CARD)
         processor = AutoProcessor.from_pretrained(
             MODEL_CARD, language="english", task="transcribe")
-    model.to('cuda')
+    model.to('cuda:2')
     model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(
         language="english", task="transcribe")
     print("load dataset....")
@@ -129,10 +150,19 @@ if __name__ == "__main__":
         geo_group = sub_folder.split("/")[-1]
         print(f"inferencing on {geo_group} validation transcripts...")
         pred_out_file = get_output_file(
-            pargs, MODEL_NAME, EPOCHS, group=geo_group)
+            pargs, MODEL_NAME, group=geo_group)
         if os.path.exists(pred_out_file):
-        # calculate WER
-            pass
+            # calculate utterance-level WER
+            sub_df = pd.read_csv(pred_out_file)
+            sub_df['path'] = sub_df['path'].apply(lambda x: os.path.basename(x))
+            sub_df['prediction'] = sub_df['prediction'].apply(clean_txt)
+            if pargs.finetune:
+                sub_df['ft_wer'] = sub_df.apply(compute_wer, axis=1)
+                sub_df.dropna(subset=['ft_wer'], inplace=True)
+            else:
+                sub_df['pt_wer'] = sub_df.apply(compute_wer, axis=1)
+                sub_df.dropna(subset=['pt_wer'], inplace=True)
+            sub_df.to_csv(pred_out_file, index=False)
         else:
             coraal_dt = load_dataset("audiofolder", data_dir=sub_folder)
             coraal_dt = coraal_dt.cast_column("audio", Audio(sampling_rate=16000))

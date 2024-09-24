@@ -83,14 +83,14 @@ if __name__ == "__main__":
         MODEL_CARD, language="english", task="transcribe")
         if pargs.finetune:
             processor = AutoProcessor.from_pretrained(
-                f"../ft-models/{MODEL_NAME}-{EPOCHS}/processor")
+                f"{config['MODEL']['checkpoint']}/{MODEL_NAME}-{EPOCHS}/processor")
             model = WhisperForConditionalGeneration.from_pretrained(
-                f"../ft-models/{MODEL_NAME}-{EPOCHS}/model")
+                f"{config['MODEL']['checkpoint']}/{MODEL_NAME}-{EPOCHS}/model")
         else:
             model = WhisperForConditionalGeneration.from_pretrained(MODEL_CARD)
             processor = AutoProcessor.from_pretrained(
                 MODEL_CARD, language="english", task="transcribe")
-        model.to('cuda')
+        model.to('cuda:2')
         model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(
             language="english", task="transcribe")
         print("load dataset....")

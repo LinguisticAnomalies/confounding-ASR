@@ -127,12 +127,15 @@ dependencies:
       - attrs==24.2.0
       - audioread==3.0.1
       - cffi==1.17.1
+      - chardet==5.2.0
+      - click==8.1.7
       - datasets==2.21.0
       - dill==0.3.8
       - evaluate==0.4.2
       - frozenlist==1.4.1
       - fsspec==2024.6.1
       - huggingface-hub==0.24.6
+      - jiwer==3.0.4
       - joblib==1.4.2
       - lazy-loader==0.4
       - librosa==0.10.2.post1
@@ -149,8 +152,10 @@ dependencies:
       - pyarrow==17.0.0
       - pycparser==2.22
       - pydub==0.25.1
+      - pysrt==1.1.2
       - python-dateutil==2.9.0.post0
       - pytz==2024.1
+      - rapidfuzz==3.9.7
       - regex==2024.7.24
       - safetensors==0.4.5
       - scikit-learn==1.5.1

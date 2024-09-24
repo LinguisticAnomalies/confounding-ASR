@@ -84,7 +84,7 @@ def clean_txt(txtin):
         return ""
     else:
         txtout = words_to_numbers(txtin)
-        txtout = re.sub(r'[^a-zA-Z0-9\s\']', "", txtout)
+        txtout = re.sub(r'[^a-zA-Z0-9\s\'\-]', "", txtout)
         return txtout.lower().strip()
 
 
