@@ -247,7 +247,10 @@ def calculate_perplexity_batch(model, sentences):
             targets = batch[i, 1:sentence_len]
             
             probs = F.softmax(sentence_logits, dim=-1)
-            loss = F.cross_entropy(sentence_logits, targets)
+            loss = F.cross_entropy(
+                sentence_logits.view(-1, sentence_logits.size(-1)),
+                targets.view(-1), reduction='sum')
+            loss = loss / (sentence_len - 1)
             perplexity = torch.exp(loss)
             perplexities.append(perplexity.item())
         
@@ -325,7 +328,7 @@ if __name__ == "__main__":
     # training process
     if pargs.train:
         for train_component in locs:
-            model_name = f"../fine-tuned/gpt-{train_component}.pth"
+            model_name = f"../fine-tuned/split/gpt-{train_component}.pth"
             train_df, test_df, _ = get_data(train_component, config_parser)
             train_sents = train_df['transcription'].values.tolist()
             test_sents = test_df['transcription'].values.tolist()
@@ -380,7 +383,7 @@ if __name__ == "__main__":
         total_ppls = pd.DataFrame()
         for train_component in locs:
             print(f"Evaluating GPT-{train_component}")
-            model_name = f"../fine-tuned/gpt-{train_component}.pth"
+            model_name = f"../fine-tuned/split/gpt-{train_component}.pth"
             model = GPTLanguageModel(
                 vocab_size, n_embd, block_size, n_head, n_layer)
             model.load_state_dict(torch.load(model_name))
