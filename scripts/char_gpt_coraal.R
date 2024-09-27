@@ -1,6 +1,6 @@
 library(ggplot2)
 library(dplyr)
-ppls <- read.csv("../data/char_gpt_ppl.csv")
+ppls <- read.csv("char_gpt_ppl.csv")
 ppls <- ppls %>%
     mutate(
         region = ifelse(train_corpus %in% c("PRV", "VLD"), "Rural", "Urban")
@@ -25,7 +25,7 @@ p <- ggplot(
          color = "Validating Component",
          shape = "Region") +
     theme_minimal() +
-    theme(legend.position = c(0.90, 0.80),
+    theme(legend.position = c(0.85, 0.80),
           legend.text = element_text(size = 10)) +
     guides(color = guide_legend(ncol = 2))
 p

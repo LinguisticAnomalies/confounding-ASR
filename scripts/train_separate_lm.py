@@ -294,6 +294,24 @@ def get_val_ppl(model, eval_list):
         ppls.append(ppl)
     return ppls
 
+def get_val_ppl_driver(locs):
+    total_ppls = pd.DataFrame()
+    for loc in locs:
+        print(f"Evaluating GPT on {loc}")
+        model_name = f"../fine-tuned/gpt-{loc}.pth"
+        val_df = pd.read_csv(
+            os.path.join(config_parser['DATA']['val'], loc, "metadata.csv"))
+        model = GPTLanguageModel(
+                vocab_size, n_embd, block_size, n_head, n_layer)
+        model.load_state_dict(torch.load(model_name))
+        model.to(device)
+        val_sents = val_df['transcription'].values.tolist()
+        val_ppls = get_val_ppl(model, val_sents)
+        val_df['ppl'] = val_ppls
+        total_ppls = pd.concat([total_ppls, val_df])
+    total_ppls.to_csv("../val_ppls.csv", index=False)
+        
+
 
 if __name__ == "__main__":
     start_time = datetime.now()
@@ -310,7 +328,6 @@ if __name__ == "__main__":
     encode = lambda s: [stoi[c] for c in s]
     decode = lambda l: ''.join([itos[i] for i in l])
     ci_data = []
-    val_ppls_df = pd.DataFrame()
     for train_component in locs:
         model_name = f"../fine-tuned/gpt-{train_component}.pth"
         text = get_data(train_component)
@@ -322,36 +339,28 @@ if __name__ == "__main__":
         encode = lambda s: [stoi[c] for c in s]
         decode = lambda l: ''.join([itos[i] for i in l])
         if os.path.exists(model_name):
-            print(f"Evaluating GPT on {train_component}")
-            model = GPTLanguageModel(
-                vocab_size, n_embd, block_size, n_head, n_layer)
-            model.load_state_dict(torch.load(model_name))
-            model.to(device)
-            for val_component in locs:
-                ppls = []
-                if val_component != train_component:
-                    val_text = get_data(val_component)
-                    ppl, interval = ppl_driver(model, val_text)
-                    record = {
-                        "train_corpus": train_component,
-                        "eval_corpus": val_component,
-                        "ppl": ppl,
-                        "lower_ci": interval[0],
-                        "upper_ci": interval[1]}
-                    ci_data.append(record)
-                    print(f"GPT-{train_component} ppl on {val_component}: {ppl}, 95% lower CI: {interval[0]}, 95% upper CI: {interval[1]}")
-                    print("------------------")
-                else:
-                    val_df = pd.read_csv(
-                        os.path.join(config_parser['DATA']['val'], train_component, "metadata.csv"))
-                    val_sents = val_df['transcription'].values.tolist()
-                    val_ppls = get_val_ppl(model, val_sents)
-                    val_df['ppl'] = val_ppls
-                    val_ppls_df = pd.concat([val_ppls_df, val_df])
-                    print("------------------")
-            val_ppls_df.to_csv("../val_ppl.csv", index=False)
-            ci_df = pd.DataFrame(ci_data)
-            ci_df.to_csv("../char_gpt_ppl_coraal.csv", index=False)
+            pass
+            # print(f"Evaluating GPT on {train_component}")
+            # model = GPTLanguageModel(
+            #     vocab_size, n_embd, block_size, n_head, n_layer)
+            # model.load_state_dict(torch.load(model_name))
+            # model.to(device)
+            # for val_component in locs:
+            #     ppls = []
+            #     if val_component != train_component:
+            #         val_text = get_data(val_component)
+            #         ppl, interval = ppl_driver(model, val_text)
+            #         record = {
+            #             "train_corpus": train_component,
+            #             "eval_corpus": val_component,
+            #             "ppl": ppl,
+            #             "lower_ci": interval[0],
+            #             "upper_ci": interval[1]}
+            #         ci_data.append(record)
+            #         print(f"GPT-{train_component} ppl on {val_component}: {ppl}, 95% lower CI: {interval[0]}, 95% upper CI: {interval[1]}")
+            #         print("------------------")
+            # ci_df = pd.DataFrame(ci_data)
+            # ci_df.to_csv("../char_gpt_ppl_coraal.csv", index=False)
         else:
             # training and validation split
             print(f"Training GPT on {train_component}")
@@ -392,5 +401,6 @@ if __name__ == "__main__":
                             print("early stopping")
                             break
             torch.save(best_model_state_dict, model_name)
+    get_val_ppl_driver(locs)
     print(f"Total running time: {datetime.now() - start_time}")
 

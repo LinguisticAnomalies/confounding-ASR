@@ -6,16 +6,17 @@ wer_files = glob("../whisper-output-clean/val/*.csv")
 locs = ("ATL", "DCA", "DCB", "LES", "PRV", "ROC", "VLD")
 for loc in locs:
     loc_files = [item for item in wer_files if loc in item]
-    sub_df_1 = pd.read_csv(loc_files[0])
-    sub_df_2 = pd.read_csv(loc_files[1])
-    loc_df = pd.merge(sub_df_1, sub_df_2, on='path')
+    pt_df = pd.read_csv([item for item in loc_files if "pt" in item][0])
+    ft_df = pd.read_csv([item for item in loc_files if "ft" in item][0])
+    loc_df = pd.merge(pt_df, ft_df, on='path')
     loc_df = loc_df[['path', "ft_wer", "pt_wer"]]
+    print(loc_df.sample(n=20))
     wer_df = pd.concat([wer_df, loc_df])
 mos_df = pd.read_csv("../mos_total.csv")
 mos_df = mos_df.loc[mos_df['loc'] != "river"]
 mos_df = mos_df.loc[mos_df['split'] == "val"]
 mos_df = mos_df.rename(columns={"split": "mos_split"})
-ppl_df = pd.read_csv("../val_ppl.csv")
+ppl_df = pd.read_csv("../val_ppls.csv")
 ppl_df = ppl_df.rename(columns={"file_name": "path"})
 mos_df = mos_df.merge(ppl_df, on="path")
 val_df = pd.merge(mos_df, wer_df, on='path')
@@ -31,7 +32,7 @@ def contains_match(text):
 mask = ~val_df['transcription'].apply(contains_match)
 val_df = val_df[mask]
 # WER > 1 utterances
-val_df = val_df.loc[(val_df['pt_wer'] < 1) & (val_df['ft_wer'] < 1)]
+val_df = val_df.loc[(val_df['pt_wer'] <= 1) & (val_df['ft_wer'] <= 1)]
 print(val_df.shape)
-print(val_df.sort_values(by=['ppl']))
-val_df.to_csv("../total_val.csv", index=False)
+print(val_df['loc'].unique())
+# val_df.to_csv("../total_val.csv", index=False)

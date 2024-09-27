@@ -120,7 +120,7 @@ if __name__ == "__main__":
     pargs = parge_args()
     config = configparser.ConfigParser()
     config.read("config.ini")
-    
+    wer = evaluate.load("wer")
     if pargs.model_name.startswith("whisper"):
         MODEL_CARD = f"openai/{pargs.model_name}"
     else:
@@ -155,13 +155,18 @@ if __name__ == "__main__":
             # calculate utterance-level WER
             sub_df = pd.read_csv(pred_out_file)
             sub_df['path'] = sub_df['path'].apply(lambda x: os.path.basename(x))
-            sub_df['prediction'] = sub_df['prediction'].apply(clean_txt)
+            sub_df['prediction'] = sub_df['prediction'].astype(str).apply(clean_txt)
+            sub_df['transcription'] = sub_df['transcription'].astype(str).apply(clean_txt)
+            wers = []
+            for _, row in sub_df.iterrows():
+                prediction = row['prediction'] if row['prediction'] else ''
+                transcription = row['transcription']
+                res = wer.compute(predictions=[transcription], references=[prediction])
+                wers.append(res)
             if pargs.finetune:
-                sub_df['ft_wer'] = sub_df.apply(compute_wer, axis=1)
-                sub_df.dropna(subset=['ft_wer'], inplace=True)
+                sub_df['ft_wer'] = wers
             else:
-                sub_df['pt_wer'] = sub_df.apply(compute_wer, axis=1)
-                sub_df.dropna(subset=['pt_wer'], inplace=True)
+                sub_df['pt_wer'] = wers
             sub_df.to_csv(pred_out_file, index=False)
         else:
             coraal_dt = load_dataset("audiofolder", data_dir=sub_folder)
