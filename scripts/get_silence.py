@@ -44,28 +44,39 @@ def create_profile(input_path, profile_path):
     """
     audio_clips = glob(f"{input_path}/*.wav")
     os.makedirs(profile_path, exist_ok=True)
-    max_silence = 0
-    for clip in tqdm(audio_clips, desc="Finding the silences in the audio"):
-        audio_array = AudioSegment.from_wav(clip)
-        dBFS = audio_array.dBFS
-        silences = silence.detect_silence(
-            audio_array, min_silence_len=500, silence_thresh=dBFS-16)
-        if silences:
-            for silence_interval in silences:
-                curr_silence  = silence_interval[1] - silence_interval[0]
-                if curr_silence > max_silence:
-                    print("Found the longest silence")
-                    max_silence = curr_silence
-                    clip_file = os.path.basename(clip).split(".")[0].split("_")[0]
-                    # write silence period to a local file
-                    sliced_audio = audio_array[silence_interval[0]:silence_interval[1]]
-                    # create noise profile
-                    silence_file = os.path.join(profile_path, f"{clip_file}.wav")
-                    sliced_audio.export(silence_file, format='wav')
-                    output_clip = os.path.join(profile_path, f"{clip_file}_noise.prof")
-                    os.system(f"sox {silence_file} -n noiseprof {output_clip}")
-                    # remove silence audio
-                    os.remove(os.path.join(profile_path, f"{clip_file}.wav"))
+    max_silence = {
+        "ATL": 0,
+        "DCA": 0,
+        "DCB": 0,
+        "LES": 0,
+        "PRV": 0,
+        "ROC": 0,
+        "VLD": 0
+    }
+    if len(os.listdir(profile_path)) == 0:
+        for clip in tqdm(audio_clips, desc="Finding the silences in the audio"):
+            audio_array = AudioSegment.from_wav(clip)
+            dBFS = audio_array.dBFS
+            silences = silence.detect_silence(
+                audio_array, min_silence_len=500, silence_thresh=dBFS-16)
+            clip_file = os.path.basename(clip).split(".")[0].split("_")[0]
+            if silences:
+                for silence_interval in silences:
+                    curr_silence  = silence_interval[1] - silence_interval[0]
+                    if curr_silence > max_silence[clip_file]:
+                        # print(f"Found the longest silence in {clip_file}")
+                        max_silence[clip_file] = curr_silence
+                        # write silence period to a local file
+                        sliced_audio = audio_array[silence_interval[0]:silence_interval[1]]
+                        # create noise profile
+                        silence_file = os.path.join(profile_path, f"{clip_file}.wav")
+                        sliced_audio.export(silence_file, format='wav')
+                        output_clip = os.path.join(profile_path, f"{clip_file}_noise.prof")
+                        os.system(f"sox {silence_file} -n noiseprof {output_clip}")
+                        # remove silence audio
+                        os.remove(silence_file)
+    else:
+        pass
 
 
 def reduce_noise(input_path, profile_path, output_path):
@@ -81,13 +92,16 @@ def reduce_noise(input_path, profile_path, output_path):
     """
     audio_clips = glob(f"{input_path}/*.wav")
     os.makedirs(output_path, exist_ok=True)
-    for clip in tqdm(audio_clips, desc="Reducing noise from audio clips"):
-        clip_file = os.path.basename(clip).split(".")[0]
-        loc_indicator = os.path.basename(clip).split(".")[0].split("_")[0]
-        noise_profile = f"{loc_indicator}_noise.prof"
-        noise_profile_path = os.path.join(profile_path, noise_profile)
-        output_clip = os.path.join(output_path, f"{clip_file}_denoised.wav")
-        os.system(f"sox {clip} {output_clip} noisered {noise_profile_path} 0.21")
+    if len(os.listdir(output_path)) == 0:
+        for clip in tqdm(audio_clips, desc="Reducing noise from audio clips"):
+            clip_file = os.path.basename(clip).split(".")[0]
+            loc_indicator = os.path.basename(clip).split(".")[0].split("_")[0]
+            noise_profile = f"{loc_indicator}_noise.prof"
+            noise_profile_path = os.path.join(profile_path, noise_profile)
+            output_clip = os.path.join(output_path, f"{clip_file}_denoised.wav")
+            os.system(f"sox {clip} {output_clip} noisered {noise_profile_path} 0.21")
+    else:
+        pass
 
 
 def map_to_pred(batch):
@@ -137,16 +151,33 @@ if __name__ == "__main__":
     pargs = parge_args()
     config = configparser.ConfigParser()
     config.read("config.ini")
+    device = "cuda"
     locs = ("ATL", "DCA", "DCB", "LES", "PRV", "ROC", "VLD")
-    device = "cuda:3"
-    for loc in locs:
-        print(f"----- Process {loc} ------")
-        subset_input = os.path.join(config['DATA']['val'], loc)
-        subset_np = os.path.join(config['DATA']["val_noise_profile"], loc)
-        subset_nr = os.path.join(config['DATA']["val_nr"], loc)
-        if not os.path.exists(os.path.join(subset_np, f"{loc}_noise.prof")):
+    for subset in ("train", "test", "val"):
+        if subset == "val":
+            for loc in locs:
+                print(f"----- Process {loc}, in validation set ------")
+                subset_input = os.path.join(config['DATA']['val'], loc)
+                subset_np = os.path.join(config['DATA']["val_noise_profile"], loc)
+                subset_nr = os.path.join(config['DATA']["val_nr"], loc)
+                create_profile(subset_input, subset_np)
+                reduce_noise(subset_input, subset_np, subset_nr)
+                metadata = pd.read_csv(os.path.join(subset_input, "metadata.csv"))
+                metadata['file_name'] = metadata["file_name"].str.replace(".wav", "_denoised.wav")
+                audio_files = glob(f"{subset_nr}/*.wav")
+                audio_files = [os.path.basename(item) for item in audio_files]
+                metadata.to_csv(os.path.join(subset_nr, "metadata.csv"), index=False)
+        else:
+            print(f"----- Process {subset} set ------")
+            subset_input = config['DATA'][f'{subset}']
+            subset_np = config['DATA'][f"{subset}_noise_profile"]
+            subset_nr = config['DATA'][f"{subset}_nr"]
             create_profile(subset_input, subset_np)
             reduce_noise(subset_input, subset_np, subset_nr)
+            metadata = pd.read_csv(os.path.join(subset_input, "metadata.csv"))
+            metadata['file_name'] = metadata["file_name"].str.replace(".wav", "_denoised.wav")
+            metadata.to_csv(os.path.join(subset_nr, "metadata.csv"), index=False)
+    for loc in locs:
         out_file = get_output_file(pargs, loc)
         if os.path.exists(out_file):
             overall_wer = evaluate.load("wer")
@@ -165,10 +196,10 @@ if __name__ == "__main__":
                 "openai/whisper-large-v2", language="english", task="transcribe")
             if pargs.finetune:
                 processor = AutoProcessor.from_pretrained(
-                    f"{config['MODEL']['checkpoint']}/whisper-large-v2-4/processor",
+                    f"{config['MODEL']['checkpoint']}/whisper-large-v2-4-nr/processor",
                     language="english", task="transcribe")
                 model = WhisperForConditionalGeneration.from_pretrained(
-                    f"{config['MODEL']['checkpoint']}/whisper-large-v2-4/model")
+                    f"{config['MODEL']['checkpoint']}/whisper-large-v2-4-nr/model")
             else:
                 model = WhisperForConditionalGeneration.from_pretrained(
                     "openai/whisper-large-v2"
@@ -179,7 +210,10 @@ if __name__ == "__main__":
             model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(
             language="english", task="transcribe")
 
-            sub_folder = os.path.join(config['DATA']['val'], loc)
+            sub_folder = os.path.join(config['DATA']['val_nr'], loc)
+            # remove the accidental denoise wav file
+            if os.path.exists(os.path.join(sub_folder, f"{loc}_denoised.wav")):
+                os.remove(os.path.join(sub_folder, f"{loc}_denoised.wav"))
             coraal_dt = load_dataset("audiofolder", data_dir=sub_folder)
             coraal_dt = coraal_dt.cast_column("audio", Audio(sampling_rate=16000))
             result = coraal_dt.map(map_to_pred, remove_columns=['audio'])

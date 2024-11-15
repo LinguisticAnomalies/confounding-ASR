@@ -1,7 +1,6 @@
 '''
 Fine tune whisper on CORAAL test set
 '''
-
 from datetime import datetime
 import warnings
 import argparse
@@ -21,7 +20,6 @@ from transformers import (
     set_seed
 )
 warnings.filterwarnings('ignore')
-
 
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
@@ -55,8 +53,8 @@ def parge_args():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--model_name", required=True, type=str,
-        help="""the name of whisper model"""
+        "--nr", action="store_true",
+        help="""if fine-tuning on the noise-reduced set"""
     )
     return parser.parse_args()
 
@@ -91,42 +89,53 @@ if __name__ == "__main__":
     set_seed(42)
     torch_dtype = torch.float16
     pargs = parge_args()
-    if pargs.model_name.startswith("whisper"):
-        model_card = f"openai/{pargs.model_name}"
-    else:
-        model_card = f"distil-whisper/{pargs.model_name}"
+    model_card = "openai/whisper-large-v2"
+    model_name = "whisper-large-v2"
     EPOCHS = 4
     config = configparser.ConfigParser()
     config.read("config.ini")
+    if pargs.nr:
+        coraal_dt = load_dataset(
+            "audiofolder",
+            data_dir=config['DATA']['denoise'],
+        )
+        model_output = f"{config['MODEL']['checkpoint']}/{model_name}-{EPOCHS}-nr/model/"
+        processor_output = f"{config['MODEL']['checkpoint']}/{model_name}-{EPOCHS}-nr/processor/"
+    else:
+        coraal_dt = load_dataset(
+            "audiofolder",
+            data_dir=config['DATA']['data'],
+        )
+        model_output = f"{config['MODEL']['checkpoint']}/{model_name}-{EPOCHS}/model/"
+        processor_output = f"{config['MODEL']['checkpoint']}/{model_name}-{EPOCHS}/processor/"
     processor = AutoProcessor.from_pretrained(
         model_card)
     tokenizer = WhisperTokenizer.from_pretrained(
         model_card)
     feature_extractor = WhisperFeatureExtractor.from_pretrained(model_card)
-    coraal_dt = load_dataset(
-        "audiofolder", data_dir=config['DATA']['data'],)
-        # split="train[:1%]")
     coraal_dt = coraal_dt.cast_column("audio", Audio(sampling_rate=16000))
     print("preprocessing the audio dataset")
     coraal_dt = coraal_dt.map(
-        prepare_dataset, num_proc=16, remove_columns=['audio', 'transcription'])
+        prepare_dataset, num_proc=64, remove_columns=['audio', 'transcription'])
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
         model_card,
-        low_cpu_mem_usage=True,)
-        # attn_implementation="flash_attention_2",
-        # use_safetensors=True)
+        low_cpu_mem_usage=True,
+        use_safetensors=True,
+        attn_implementation="sdpa",)
+        #torch_dtype=torch_dtype)
     # freeze encoder
     model.freeze_encoder()
     model.is_parallelizable = True
     model.model_parallel = True
     model.config.use_cache = False
     model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(
-        language="english", task="transcribe")
+        language="en", task="transcribe")
+    # model.forward = torch.compile(model.forward, mode="reduce-overhead", fullgraph=True)
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
     # training process
     training_args = Seq2SeqTrainingArguments(
-        output_dir=f"../{pargs.model_name}", 
-        per_device_train_batch_size=16,
+        output_dir=f"../{model_name}", 
+        per_device_train_batch_size=32,
         gradient_accumulation_steps=1,
         learning_rate=5e-4,
         warmup_steps=100,
@@ -146,7 +155,7 @@ if __name__ == "__main__":
         metric_for_best_model="wer",
         greater_is_better=False,
         seed=42,
-        data_seed=42,
+        # data_seed=42,
     )
     trainer = Seq2SeqTrainer(
         args=training_args,
@@ -159,6 +168,6 @@ if __name__ == "__main__":
     )
     trainer.train()
     # save to local
-    model.save_pretrained(f"../ft-models/{pargs.model_name}-{EPOCHS}/model/")
-    processor.save_pretrained(f"../ft-models/{pargs.model_name}-{EPOCHS}/processor/")
+    model.save_pretrained(model_output)
+    processor.save_pretrained(processor_output)
     print(f"Total running time: {datetime.now() - start_time}")
