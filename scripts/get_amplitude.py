@@ -1,5 +1,6 @@
 import os
 import re
+from functools import lru_cache
 import configparser
 import argparse
 import shutil
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 from glob import glob
 from tqdm import tqdm
 import librosa
-from pydub import AudioSegment, silence
+from pydub import AudioSegment
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -36,74 +37,7 @@ def parge_args():
     return parser.parse_args()
 
 
-def cut_audio(input_path, silence_path, speech_path, remove=True):
-    """cut the audio recordings into silience and speech clips
-
-    Args:
-        input_path (str): the path to the original audio recordings
-        silence_path (str): the path to the silence clips by subset
-        speech_path (str): the path to the speech clips by subset
-        remove (bool, optional): if remove the previously cut audio clips. Defaults to True.
-    """
-    if remove:
-        if os.path.exists(silence_path):
-            shutil.rmtree(silence_path)
-        if os.path.exists(speech_path):
-            shutil.rmtree(speech_path)
-    audio_clips = glob(f"{input_path}/*.wav")
-    os.makedirs(silence_path, exist_ok=True)
-    os.makedirs(speech_path, exist_ok=True)
-    # for more precise detection
-    seek_step = 1
-    # find and cut any silence clips > 100ms
-    for clip in tqdm(audio_clips, desc="Finding and sliding the silences in the audio"):
-        filename = os.path.basename(clip)
-        base_filename = os.path.splitext(filename)[0]
-        audio_array = AudioSegment.from_wav(clip)
-        dBFS = audio_array.dBFS
-        silences = silence.detect_silence(
-                audio_array,
-                min_silence_len=500,
-                silence_thresh=dBFS-25,
-                seek_step=seek_step)
-        if silences:
-            silences.sort(key=lambda x: x[0])
-            audio_length = len(audio_array)
-            last_end = 0
-            for i, (start, end) in enumerate(silences):
-                adjusted_start = min(start + seek_step, audio_length)
-                adjusted_end = max(end - seek_step, 0)
-                if adjusted_end > adjusted_start:
-                    silence_audio = audio_array[adjusted_start:adjusted_end]
-                    # double check if the silence is indeed silence
-                    segment_dBFS = silence_audio.dBFS
-                    if segment_dBFS is not None and segment_dBFS < dBFS-16:
-                        silence_filename = f"{base_filename}_silence_{i}.wav"
-                        silence_audio.export(
-                            os.path.join(silence_path, silence_filename),
-                            format="wav"
-                        )
-                if start > last_end:
-                    speech_start = last_end + seek_step
-                    speech_end = start - seek_step
-                    if speech_end > speech_start:
-                        speech_audio = audio_array[speech_start:speech_end]
-                        speech_filename = f"{base_filename}_speech_{i}.wav"
-                        speech_audio.export(
-                            os.path.join(speech_path, speech_filename),
-                            format="wav"
-                        )
-                last_end = end
-            if last_end < audio_length - seek_step:
-                speech_audio = audio_array[last_end + seek_step:audio_length]
-                speech_filename = f"{base_filename}_speech_final.wav"
-                speech_audio.export(
-                    os.path.join(speech_path, speech_filename),
-                    format="wav"
-                )
-
-
-def get_amplitudes(input_path, expected_sr=44100):
+def get_amplitudes(input_path, audio_type, expected_sr=44100):
     """
     get mean amplitude of each audio clip given a folder
 
@@ -116,23 +50,34 @@ def get_amplitudes(input_path, expected_sr=44100):
     """
     mean_amplitudes = []
     component = input_path.split("/")[-1]
-    audio_type = input_path.split("/")[-2]
     audio_files = glob(f"{input_path}/*.wav")
     for audio_file in tqdm(
         audio_files, total=len(audio_files), desc=f"Processing {audio_type} audio clips"):
         filename = os.path.basename(audio_file)
         base_filename = os.path.splitext(filename)[0]
         y, _ = librosa.load(path=audio_file, sr=expected_sr)
-        db = 20*np.log10(np.abs(y) + 1e-10)
+        print(y)
+        print("----------")
+        db = 20*np.log10(np.abs(y) + 1e-5)
         mean_amplitudes.append(
             {"subset": component, 
              "filename": base_filename,
              "type": audio_type, 
              "amplitudes": np.mean(db)})
+        time.sleep(1)
     return mean_amplitudes
 
 
 def plot_separate_violins(df):
+    """violin plot for each subset in CORAAL
+
+
+    Args:
+        df (pandas.DataFrame): dataframe containing amplitidues for each clip
+    """
+    # fill silence na with 0
+    df.fillna(0, inplace=True)
+    print(df.shape)
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 12), height_ratios=[1, 1, 1])
     silence_stats = df[df['type'] == 'silence'].groupby('subset')['amplitudes'].agg(['mean', 'std', 'max'])
     speech_stats = df[df['type'] == 'speech'].groupby('subset')['amplitudes'].agg(['mean', 'std', 'max'])
@@ -220,6 +165,7 @@ def plot_separate_violins(df):
                 format='png')
 
 
+@lru_cache(maxsize=128)
 def load_tiers(file_path):
     """
     load and merge the specified tiers from a TextGrid file, sorted by start time
@@ -232,47 +178,104 @@ def load_tiers(file_path):
     """
     tg = textgrid.TextGrid.fromFile(file_path)
     all_intervals = []
-    # load tiers
-    for tiers in tg.tiers:
-        # include misc for silence
-        for interval in tiers:
-            text = interval.mark.strip()
-            all_intervals.append(
-                SpeakingInterval(
-                    start_time=interval.minTime,
-                    end_time=interval.maxTime,
-                    type="speech",
-                    text= text if text else None
-                )
+    
+    for tier in tg.tiers:
+        intervals = [
+            SpeakingInterval(
+                start_time=interval.minTime,
+                end_time=interval.maxTime,
+                type="speech",
+                text=text if (text := interval.mark.strip()) else None
             )
+            for interval in tier
+            if interval.mark.strip()
+        ]
+        all_intervals.extend(intervals)
+    
     return sorted(all_intervals, key=lambda x: x.start_time)
 
 
 def find_silence_gaps(intervals, min_gap=0.05):
-    silence_gaps = []
+    """
+    find silence gaps between utterances
+
+    Args:
+        intervals (list): a list of tiers from TextGrid 
+        min_gap (float, optional): mininal gap for silence. Defaults to 0.05.
+
+    Returns:
+        list: a list of SpeakingInterval for silences
+    """
     if not intervals:
         return []
     current_end = intervals[0].end_time
-    for i in range(1, len(intervals)):
-        current = intervals[i]
-        previous = intervals[i-1]
-        next_start = current.start_time
-        if next_start > current_end:
-            gap_duration = next_start - current_end
-            if gap_duration >= min_gap:
-                # if current.text is None and previous.text is None:
-                print(intervals[i])
-                print(intervals[i-1])
-                temp_si = SpeakingInterval(
-                    start_time=current_end,
-                    end_time=next_start,
-                    type="silence",
-                    text=None)
-                current_end = max(current_end, current.end_time)
-                print(temp_si)
-                time.sleep(3)
-                print("--------------")
-    return silence_gaps
+    return [
+        SpeakingInterval(
+            start_time=current_end,
+            end_time=intervals[i].start_time,
+            type="silence",
+            text=None
+        )
+        for i in range(1, len(intervals))
+        if (gap_duration := intervals[i].start_time - current_end) >= min_gap
+        and (current_end := max(current_end, intervals[i].end_time)) is not None
+    ]
+
+
+def process_single_file(tg_file: str, config: configparser.ConfigParser, 
+                       subset: str, speech_path: str, silence_path: str):
+    """Process a single TextGrid file with optimized operations"""
+    all_tiers = load_tiers(tg_file)
+    silence_gaps = find_silence_gaps(all_tiers)
+    
+    audio_file = f"{os.path.splitext(os.path.basename(tg_file))[0]}.wav"
+    audio_file = os.path.join(f"{config['DATA']['audio']}/{subset}", audio_file)
+    
+    cut_audio(audio_file, all_tiers, silence_gaps, speech_path, silence_path)
+
+
+def cut_audio(audio_path, speech_intervals, silence_intervals, speech_path, silence_path):
+    """
+    cut audio for speech and silence intervals
+
+    Args:
+        audio_path (str): the path to the audio recording
+        speech_intervals (list): the list of adjusted speech intervals
+        silence_intervals (list): the list of silence gaps
+        speech_path (str): the path to store speech audio clips
+        silence_path (str): the path to store silence audio clips
+    """
+    audio_array = AudioSegment.from_wav(audio_path)
+    base_filename = os.path.splitext(os.path.basename(audio_path))[0]
+    
+    # Process speech intervals
+    for i, interval in enumerate(speech_intervals):
+        file_name = f"{base_filename}_speech_{i}.wav"
+        out_file = os.path.join(speech_path, file_name)
+        start_ms = int(interval.start_time * 1000)
+        end_ms = int(interval.end_time * 1000)
+        segment = audio_array[start_ms:end_ms]
+        segment.export(out_file, format="wav")
+    
+    # Process silence intervals
+    for i, interval in enumerate(silence_intervals):
+        file_name = f"{base_filename}_silence_{i}.wav"
+        out_file = os.path.join(silence_path, file_name)
+        start_ms = int(interval.start_time * 1000)
+        end_ms = int(interval.end_time * 1000)
+        segment = audio_array[start_ms:end_ms]
+        segment.export(out_file, format="wav")
+
+
+def process_single_file(tg_file, config, subset, speech_path, silence_path):
+    """Process a single TextGrid file"""
+    all_tiers = load_tiers(tg_file)
+    silence_gaps = find_silence_gaps(all_tiers)
+    
+    audio_file = f"{os.path.splitext(os.path.basename(tg_file))[0]}.wav"
+    audio_file = os.path.join(f"{config['DATA']['audio']}/{subset}", audio_file)
+    
+    cut_audio(audio_file, all_tiers, silence_gaps, speech_path, silence_path)
 
 if __name__ == "__main__":
     pargs = parge_args()
@@ -280,39 +283,28 @@ if __name__ == "__main__":
     config.read("config.ini")
     total_df = []
     output_file = "../coraal_amplitudes.csv"
-    do_calculate = True
-    if os.path.exists(output_file):
-        do_calculate = False
-    subsets = ("ATL", "DCA", "DCB", "LES", "PRV", "ROC", "VLD")
-    for subset in subsets:
-        print(f"-------- {subset} -------")
+    for subset in ("ATL", "DCA", "DCB", "LES", "PRV", "ROC", "VLD"):
+        silence_path = f"{config['DATA']['silence']}/{subset}"
+        speech_path = f"{config['DATA']['speech']}/{subset}"
+        os.makedirs(silence_path, exist_ok=True)
+        os.makedirs(speech_path, exist_ok=True)
+        
         tg_path = f"{config['DATA']['text_grid']}/{subset}"
         tg_files = glob(f"{tg_path}/*.TextGrid")
-        for test_file in tg_files:
-            print(test_file)
-            all_tiers = load_tiers(test_file)
-            silence_gaps = find_silence_gaps(all_tiers)
-            print(silence_gaps)
-            
-        break
-    # for subset in subsets:
-    #     silence_path = f"{config['DATA']['silence']}/{subset}"
-    #     speech_path = f"{config['DATA']['speech']}/{subset}"
-    #     if pargs.cut_audio:
-    #         print(f"Processing CORAAL {subset} subset...")
-    #         input_path = f"{config['DATA']['audio']}/{subset}"
-    #         cut_audio(
-    #             input_path, silence_path, speech_path)
-    #     if do_calculate:
-    #         total_df.extend(get_amplitudes(silence_path))
-    #         total_df.extend(get_amplitudes(speech_path))
-    # if do_calculate:
-    #     total_df = pd.DataFrame(total_df)
-    #     total_df.to_csv(output_file, index=False)
-    # else:
-    #     total_df = pd.read_csv(output_file)
-    #     # by recording/type/subset
-    #     total_df['filename'] = total_df['filename'].str.replace(r'_[^_]*_[^_]*$', '', regex=True)
-    #     total_df = total_df.groupby(['subset', 'filename', 'type']).mean().reset_index()
-    #     total_df.to_csv("../coraal_amlitudes_mean.csv", index=False)
-    #     plot_separate_violins(total_df)
+        
+        if pargs.cut_audio:
+            print(f"Processing subset: {subset}")
+            for tg_file in tg_files:
+                process_single_file(tg_file, config, subset, speech_path, silence_path)
+        else:
+            if os.path.exists(output_file):
+                pass
+            else:
+                total_df.extend(get_amplitudes(silence_path, audio_type="silence"))
+                total_df.extend(get_amplitudes(speech_path, audio_type="speech"))
+    if not os.path.exists(output_file):
+        total_df = pd.DataFrame(total_df)
+        total_df.to_csv(output_file, index=False)
+    else:
+        les_path = f"{config['DATA']['silence']}/LES"
+        get_amplitudes(les_path, "silence", expected_sr=44100)
