@@ -1,14 +1,12 @@
 import os
-import re
 from functools import lru_cache
 import configparser
 import argparse
-import shutil
+from tqdm.contrib.concurrent import process_map
+from functools import partial
 from typing import List, Tuple, Optional
-import time
 from dataclasses import dataclass
 from glob import glob
-from tqdm import tqdm
 import librosa
 from pydub import AudioSegment
 import numpy as np
@@ -16,6 +14,12 @@ import pandas as pd
 import seaborn as sns
 import textgrid
 import matplotlib.pyplot as plt
+
+
+@dataclass
+class AudioInterval:
+    start_time: float
+    end_time: float
 
 
 @dataclass
@@ -37,35 +41,78 @@ def parge_args():
     return parser.parse_args()
 
 
-def get_amplitudes(input_path, audio_type, expected_sr=44100):
+def process_audio_file(audio_file, component, audio_type, expected_sr=None):
     """
-    get mean amplitude of each audio clip given a folder
-
+    Process a single audio file to get its mean amplitude.
+    
     Args:
-        input_path (str): the folder containing the audio clips for calculating mean amplitude
-        expected_sr (int, optional): sampling rate. Defaults to 44100.
-
+        audio_file (str): Path to audio file
+        component (str): Component name
+        audio_type (str): Type of audio (silence/speech)
+        expected_sr (int, optional): Expected sample rate
+        
     Returns:
-        list: a list of dictionary
+        dict: Dictionary containing audio file metadata and amplitude
     """
-    mean_amplitudes = []
+    filename = os.path.basename(audio_file)
+    base_filename = os.path.splitext(filename)[0]
+    
+    # Use memory efficient loading with dtype=np.float32
+    y, _ = librosa.load(path=audio_file, sr=expected_sr, dtype=np.float32)
+    
+    # Vectorized computation
+    db = 20 * np.log10(np.abs(y) + 1e-10)
+    return {
+        "subset": component,
+        "filename": base_filename,
+        "type": audio_type,
+        "amplitudes": np.mean(db)
+    }
+
+
+def get_amplitudes(input_path, audio_type, n_workers=4):
+    """
+    Get mean amplitude of each audio clip given a folder using parallel processing.
+    
+    Args:
+        input_path (str): Folder containing audio clips
+        audio_type (str): Type of audio (silence/speech)
+        n_workers (int): Number of parallel workers
+        
+    Returns:
+        list: List of dictionaries containing amplitude data
+    """
     component = input_path.split("/")[-1]
     audio_files = glob(f"{input_path}/*.wav")
-    for audio_file in tqdm(
-        audio_files, total=len(audio_files), desc=f"Processing {audio_type} audio clips"):
-        filename = os.path.basename(audio_file)
-        base_filename = os.path.splitext(filename)[0]
-        y, _ = librosa.load(path=audio_file, sr=expected_sr)
-        print(y)
-        print("----------")
-        db = 20*np.log10(np.abs(y) + 1e-5)
-        mean_amplitudes.append(
-            {"subset": component, 
-             "filename": base_filename,
-             "type": audio_type, 
-             "amplitudes": np.mean(db)})
-        time.sleep(1)
-    return mean_amplitudes
+    
+    if not audio_files:
+        return []
+        
+    expected_sr = None if audio_type == "silence" else 44100
+    
+    # get chunk size
+    n_files = len(audio_files)
+    chunk_size = max(1, min(
+        n_files // (n_workers * 4),
+        100
+    ))
+    
+    # partial function with fixed arguments
+    process_func = partial(
+        process_audio_file,
+        component=component,
+        audio_type=audio_type,
+        expected_sr=expected_sr
+    )
+    
+    # parallel processing
+    return process_map(
+        process_func,
+        audio_files,
+        max_workers=n_workers,
+        chunksize=chunk_size,
+        desc=f"Processing {audio_type} audio clips"
+    )
 
 
 def plot_separate_violins(df):
@@ -75,15 +122,15 @@ def plot_separate_violins(df):
     Args:
         df (pandas.DataFrame): dataframe containing amplitidues for each clip
     """
-    # fill silence na with 0
-    df.fillna(0, inplace=True)
-    print(df.shape)
+    df = df.dropna()
+    # drop last 2 items in the filename
+    df['filename'] = df['filename'].str.split("_").str[:-2].str.join("_")
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 12), height_ratios=[1, 1, 1])
-    silence_stats = df[df['type'] == 'silence'].groupby('subset')['amplitudes'].agg(['mean', 'std', 'max'])
-    speech_stats = df[df['type'] == 'speech'].groupby('subset')['amplitudes'].agg(['mean', 'std', 'max'])
+    silence_stats = df[df['type'] == 'silence'].groupby('subset')['amplitudes'].agg(['mean', 'std', 'min'])  # Changed max to min
+    speech_stats = df[df['type'] == 'speech'].groupby('subset')['amplitudes'].agg(['mean', 'std', 'min'])   # Changed max to min
     # average SNR per location
     pivot_df = df.pivot_table(
-        index=['subset', 'filename'],
+        index=['subset', "filename"],
         columns='type',
         values='amplitudes',
         aggfunc='first'
@@ -102,13 +149,13 @@ def plot_separate_violins(df):
     ax1.set_xlabel('')  # Remove x label from upper plot
     ax1.set_ylabel('Amplitude (dB)')
     # add mean
-    offset = (ax1.get_ylim()[1] - ax1.get_ylim()[0]) * 0.02
+    offset = (ax1.get_ylim()[1] - ax1.get_ylim()[0]) * -0.02
     for idx, subset in enumerate(silence_stats.index):
         stats = silence_stats.loc[subset]
-        ax1.text(idx, stats['max'] + offset, 
+        ax1.text(idx, stats['min'] + offset,  # Changed max to min
                 f'mean={stats["mean"]:.1f}\nstd={stats["std"]:.1f}', 
                 horizontalalignment='center',
-                verticalalignment='bottom',
+                verticalalignment='top',
                 color='red',
                 fontweight='bold')
     # middle plot
@@ -123,13 +170,13 @@ def plot_separate_violins(df):
     ax2.set_xlabel('Location')
     ax2.set_ylabel('Amplitude (dB)')
     # add mean
-    offset = (ax2.get_ylim()[1] - ax2.get_ylim()[0]) * 0.02
+    offset = (ax2.get_ylim()[1] - ax2.get_ylim()[0]) * -0.02
     for idx, subset in enumerate(speech_stats.index):
         stats = speech_stats.loc[subset]
-        ax2.text(idx, stats['max'] + offset, 
+        ax2.text(idx, stats['min'] + offset,  # Changed max to min
                 f'mean={stats["mean"]:.1f}\nstd={stats["std"]:.1f}', 
                 horizontalalignment='center',
-                verticalalignment='bottom',
+                verticalalignment='top',
                 color='red',
                 fontweight='bold')
     # lower plot    
@@ -142,13 +189,13 @@ def plot_separate_violins(df):
     ax3.set_title('Signal-to-Noise Ratio (SNR) Distribution by Location')
     ax3.set_xlabel('Location')
     ax3.set_ylabel('SNR (dB)')
-    max_snr = pivot_df.groupby('subset')['snr'].max()
-    offset = (ax3.get_ylim()[1] - ax3.get_ylim()[0]) * 0.02
+    min_snr = pivot_df.groupby('subset')['snr'].min()
+    offset = (ax3.get_ylim()[1] - ax3.get_ylim()[0]) * -0.02
     for idx, row in snr_by_location.iterrows():
-        ax3.text(idx, max_snr[row['subset']] + offset, 
+        ax3.text(idx, min_snr[row['subset']] + offset, 
                 f'mean={row["mean"]:.1f}\nstd={row["std"]:.1f}', 
                 horizontalalignment='center',
-                verticalalignment='bottom',
+                verticalalignment='top',
                 color='red',
                 fontweight='bold')
     # rotation
@@ -196,30 +243,92 @@ def load_tiers(file_path):
 
 
 def find_silence_gaps(intervals, min_gap=0.05):
-    """
-    find silence gaps between utterances
-
-    Args:
-        intervals (list): a list of tiers from TextGrid 
-        min_gap (float, optional): mininal gap for silence. Defaults to 0.05.
-
-    Returns:
-        list: a list of SpeakingInterval for silences
-    """
+    silence_gaps = []
     if not intervals:
         return []
     current_end = intervals[0].end_time
-    return [
-        SpeakingInterval(
-            start_time=current_end,
-            end_time=intervals[i].start_time,
-            type="silence",
-            text=None
-        )
-        for i in range(1, len(intervals))
-        if (gap_duration := intervals[i].start_time - current_end) >= min_gap
-        and (current_end := max(current_end, intervals[i].end_time)) is not None
-    ]
+    for i in range(1, len(intervals)):
+        current = intervals[i]
+        next_start = current.start_time
+        if next_start > current_end:
+            gap_duration = next_start - current_end
+            if gap_duration >= min_gap:
+                silence_gaps.append(SpeakingInterval(
+                    start_time=current_end,
+                    end_time=next_start,
+                    type="silence",
+                    text=None)) 
+                current_end = max(current_end, current.end_time)
+    return silence_gaps
+
+
+def load_audio(audio_path: str) -> tuple[AudioSegment, str]:
+    """
+    Load audio file and extract base filename.
+    
+    Args:
+        audio_path: Path to the audio file
+        
+    Returns:
+        Tuple of (AudioSegment, base_filename)
+    """
+    base_filename = os.path.splitext(os.path.basename(audio_path))[0]
+    audio_array = AudioSegment.from_wav(audio_path)
+    return audio_array, base_filename
+
+
+def get_output_path(base_path: str, base_filename: str, interval_type: str, index: int) -> str:
+    """
+    Generate output file path for an audio segment.
+    
+    Args:
+        base_path: Directory to store the output
+        base_filename: Base name for the output file
+        interval_type: Type of interval (speech/silence)
+        index: Index of the interval
+        
+    Returns:
+        Complete output file path
+    """
+    file_name = f"{base_filename}_{interval_type}_{index}.wav"
+    return os.path.join(base_path, file_name)
+
+
+def extract_segment(audio: AudioSegment, interval: AudioInterval) -> AudioSegment:
+    """
+    Extract a segment from audio based on time interval.
+    
+    Args:
+        audio: Source audio
+        interval: Time interval to extract
+        
+    Returns:
+        Extracted audio segment
+    """
+    start_ms = int(interval.start_time * 1000)
+    end_ms = int(interval.end_time * 1000)
+    return audio[start_ms:end_ms]
+
+
+def save_segments(audio: AudioSegment,
+                 intervals: List[AudioInterval],
+                 output_path: str,
+                 base_filename: str,
+                 interval_type: str) -> None:
+    """
+    Save multiple audio segments to files.
+    
+    Args:
+        audio: Source audio
+        intervals: List of time intervals
+        output_path: Directory to store output files
+        base_filename: Base name for output files
+        interval_type: Type of intervals (speech/silence)
+    """
+    for i, interval in enumerate(intervals):
+        out_file = get_output_path(output_path, base_filename, interval_type, i)
+        segment = extract_segment(audio, interval)
+        segment.export(out_file, format="wav")
 
 
 def process_single_file(tg_file: str, config: configparser.ConfigParser, 
@@ -234,37 +343,26 @@ def process_single_file(tg_file: str, config: configparser.ConfigParser,
     cut_audio(audio_file, all_tiers, silence_gaps, speech_path, silence_path)
 
 
-def cut_audio(audio_path, speech_intervals, silence_intervals, speech_path, silence_path):
+def cut_audio(audio_path: str,
+             speech_intervals: List[AudioInterval],
+             silence_intervals: List[AudioInterval],
+             speech_path: str,
+             silence_path: str) -> None:
     """
-    cut audio for speech and silence intervals
-
+    Cut audio into speech and silence segments.
+    
     Args:
-        audio_path (str): the path to the audio recording
-        speech_intervals (list): the list of adjusted speech intervals
-        silence_intervals (list): the list of silence gaps
-        speech_path (str): the path to store speech audio clips
-        silence_path (str): the path to store silence audio clips
+        audio_path: Path to the audio recording
+        speech_intervals: List of speech intervals
+        silence_intervals: List of silence gaps
+        speech_path: Path to store speech audio clips
+        silence_path: Path to store silence audio clips
     """
-    audio_array = AudioSegment.from_wav(audio_path)
-    base_filename = os.path.splitext(os.path.basename(audio_path))[0]
-    
-    # Process speech intervals
-    for i, interval in enumerate(speech_intervals):
-        file_name = f"{base_filename}_speech_{i}.wav"
-        out_file = os.path.join(speech_path, file_name)
-        start_ms = int(interval.start_time * 1000)
-        end_ms = int(interval.end_time * 1000)
-        segment = audio_array[start_ms:end_ms]
-        segment.export(out_file, format="wav")
-    
-    # Process silence intervals
-    for i, interval in enumerate(silence_intervals):
-        file_name = f"{base_filename}_silence_{i}.wav"
-        out_file = os.path.join(silence_path, file_name)
-        start_ms = int(interval.start_time * 1000)
-        end_ms = int(interval.end_time * 1000)
-        segment = audio_array[start_ms:end_ms]
-        segment.export(out_file, format="wav")
+    audio, base_filename = load_audio(audio_path)
+    # speech segments
+    save_segments(audio, speech_intervals, speech_path, base_filename, "speech")
+    # silence segments
+    save_segments(audio, silence_intervals, silence_path, base_filename, "silence")
 
 
 def process_single_file(tg_file, config, subset, speech_path, silence_path):
@@ -284,6 +382,7 @@ if __name__ == "__main__":
     total_df = []
     output_file = "../coraal_amplitudes.csv"
     for subset in ("ATL", "DCA", "DCB", "LES", "PRV", "ROC", "VLD"):
+        print(f"Processing subset: {subset}")
         silence_path = f"{config['DATA']['silence']}/{subset}"
         speech_path = f"{config['DATA']['speech']}/{subset}"
         os.makedirs(silence_path, exist_ok=True)
@@ -293,7 +392,6 @@ if __name__ == "__main__":
         tg_files = glob(f"{tg_path}/*.TextGrid")
         
         if pargs.cut_audio:
-            print(f"Processing subset: {subset}")
             for tg_file in tg_files:
                 process_single_file(tg_file, config, subset, speech_path, silence_path)
         else:
@@ -306,5 +404,5 @@ if __name__ == "__main__":
         total_df = pd.DataFrame(total_df)
         total_df.to_csv(output_file, index=False)
     else:
-        les_path = f"{config['DATA']['silence']}/LES"
-        get_amplitudes(les_path, "silence", expected_sr=44100)
+        total_df = pd.read_csv(output_file)
+        plot_separate_violins(total_df)
